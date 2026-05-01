@@ -13,6 +13,13 @@ param(
     [int]     $Phase = 0   # 0=全部, 1=RPP, 2=カルテ, 3=アフィ
 )
 
+# ==== ログファイル設定（タスクスケジューラでもエラーが残るように） ====
+$LogDir  = "C:\csv_out\logs"
+$null    = New-Item -Path $LogDir -ItemType Directory -Force -ErrorAction SilentlyContinue
+$LogFile = Join-Path $LogDir "download_reports_$(Get-Date -Format 'yyyyMMdd_HHmm').log"
+Start-Transcript -Path $LogFile -Append
+Write-Host "=== Script started: $(Get-Date) ==="
+
 # ==== 実行フェーズを判定（0=全部） ====
 $RunPhase1 = ($Phase -eq 0 -or $Phase -eq 1)
 $RunPhase2 = ($Phase -eq 0 -or $Phase -eq 2)
@@ -798,6 +805,8 @@ finally {
         }
     }
     Write-Host "INFO: Browser closed."
+    Write-Host "=== Script ended: $(Get-Date) ==="
+    Stop-Transcript
 }
 
 if ($CleanAndUpload) {

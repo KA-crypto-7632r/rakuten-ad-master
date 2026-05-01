@@ -19,6 +19,10 @@ $null    = New-Item -Path $LogDir -ItemType Directory -Force -ErrorAction Silent
 $LogFile = Join-Path $LogDir "download_reports_$(Get-Date -Format 'yyyyMMdd_HHmm').log"
 Start-Transcript -Path $LogFile -Append
 Write-Host "=== Script started: $(Get-Date) ==="
+# 30日より古いログを削除
+Get-ChildItem $LogDir -Filter "download_reports_*.log" -ErrorAction SilentlyContinue |
+    Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 
 # ==== 実行フェーズを判定（0=全部） ====
 $RunPhase1 = ($Phase -eq 0 -or $Phase -eq 1)

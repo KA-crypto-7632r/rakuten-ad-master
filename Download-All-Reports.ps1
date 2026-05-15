@@ -623,12 +623,19 @@ try {
                 foreach ($rep in $MAP_RPP) {
                     Write-Host "`n--- Downloading: $($rep.sheet) ---"
                     $targetUrl = 'https://ad.rms.rakuten.co.jp/rpp/reports'
-                    $maxNavRetries = 5; $navRetryCount = 0
-                    do {
-                        if ($drv.Url -notlike "*rpp/reports*") { $drv.Navigate().GoToUrl($targetUrl); Start-Sleep 3 }
-                        $navRetryCount++
-                    } until ($drv.Url -like "*rpp/reports*" -or $navRetryCount -ge $maxNavRetries)
-                    if ($drv.Url -notlike "*rpp/reports*") { throw "Failed to navigate to RPP reports page." }
+                    $drv.Navigate().GoToUrl($targetUrl)
+                    Start-Sleep 5
+                    try { Wait-ForLoadingOverlayToDisappear -Driver $drv -Timeout 90 } catch {}
+                    if ($drv.Url -notlike "*rpp/reports*") {
+                        $diagStamp = (Get-Date).ToString('yyyyMMdd_HHmmss')
+                        $diagBase  = Join-Path $LogDir "rpp_nav_failed_$diagStamp"
+                        try { Set-Content -Path "$diagBase.url.txt"   -Value $drv.Url -Encoding utf8 } catch {}
+                        try { Set-Content -Path "$diagBase.title.txt" -Value $drv.Title -Encoding utf8 } catch {}
+                        try { $drv.PageSource | Out-File "$diagBase.html" -Encoding utf8 } catch {}
+                        try { [System.IO.File]::WriteAllBytes("$diagBase.png", $drv.GetScreenshot().AsByteArray) } catch {}
+                        Write-Warning "DIAG saved: $diagBase.*  (current URL: $($drv.Url))"
+                        throw "Failed to navigate to RPP reports page. Diag: $diagBase"
+                    }
                     try { $iframe = Wait-Elm $drv 'tagname' 'iframe' 5; if ($iframe) { $drv.SwitchTo().Frame($iframe) } } catch {}
 
                     Wait-Elm $drv 'id' $rep.id | % { $_.Click() }

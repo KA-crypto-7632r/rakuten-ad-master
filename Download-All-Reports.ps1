@@ -601,6 +601,36 @@ try {
         Write-Warning "INFO: 最終同意ボタンが見つかりません。既にRMS画面の可能性があります。"
     }
 
+    # --- STEP 5: 「重要なご案内」インタースティシャル（mainmenu）の対応 ---
+    # この画面を通過しないと ad.rms.rakuten.co.jp 系へ遷移すると mainmenu に戻される
+    try {
+        Start-Sleep 2
+        $isNotice = ($drv.Url -like "*mainmenu.rms.rakuten.co.jp*") -or ($drv.PageSource -match 'RMSメインメニューへ進む')
+        if ($isNotice) {
+            Write-Host "INFO: 「重要なご案内」画面を検出。通過処理中..."
+            try {
+                $cb = $drv.FindElementByXPath("//input[@type='checkbox']")
+                if ($null -ne $cb -and -not $cb.Selected) {
+                    $drv.ExecuteScript("arguments[0].click();", $cb) | Out-Null
+                    Write-Host "      - 内容確認チェックボックスをON"
+                }
+            } catch {}
+            Start-Sleep 1
+            try {
+                $menuBtn = Wait-Elm $drv 'xpath' "//button[contains(., 'RMSメインメニューへ進む')] | //a[contains(., 'RMSメインメニューへ進む')] | //*[@role='button' and contains(., 'RMSメインメニューへ進む')]" 15
+                if ($menuBtn) {
+                    $drv.ExecuteScript("arguments[0].click();", $menuBtn) | Out-Null
+                    Start-Sleep 3
+                    Write-Host "INFO: 「重要なご案内」画面を通過しました (現在URL: $($drv.Url))"
+                }
+            } catch {
+                Write-Warning "      - 「RMSメインメニューへ進む」ボタンが見つかりません"
+            }
+        }
+    } catch {
+        Write-Warning "INFO: 「重要なご案内」画面の処理でエラー (続行): $($_.Exception.Message)"
+    }
+
 
     # datatool でセッション確立
     Write-Host "INFO: Navigating to RMS datatool page to establish session..."

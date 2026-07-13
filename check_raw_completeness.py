@@ -42,13 +42,15 @@ for _np in NOTIFY_PATHS:
 
 
 # ── 通知抑制(2026-07-14) ──
-# 店舗カルテ(raw_item)は対象日=前日分が楽天側で翌朝9時頃まで未確定のことが常態
-# (2026-05-18発見。過去の成功フラグは毎日9:04頃)。5/6/7時のrunで毎朝通知が
-# 鳴り続けるのを防ぐため、①raw_itemのみの欠損は9時前は通知しない
-# ②同一対象日×同一欠損セットの通知は1日1回まで、とする。
+# run_all.ps1 は多段スケジュール(5/6/7/9/10/12/15時)で「取れるまでリトライ」する
+# 設計であり、リトライ余地が残っている間の欠損は正常動作(特に店舗カルテ=raw_itemは
+# 前日分が楽天側で9時頃まで未確定なのが常態。成功フラグは毎日9:04頃)。
+# 通知は「最終スケジュール実行(FINAL_RETRY_HOUR時)でもまだ欠損」の場合のみ送る。
+# 6月の事故型(楽天の遡及期限で永久喪失)でも当日15時に気づけばバックフィル可能。
+# ②同一対象日×同一欠損セットの通知は1日1回まで。
 # exit 2(フラグ不書込→自動リトライ)自体は抑制の有無にかかわらず維持する。
 CSV_OUT_DIR = Path(r'C:\csv_out')
-KARTE_READY_HOUR = 9
+FINAL_RETRY_HOUR = 15  # タスク RakutenDownloadAuto の最終トリガー時刻に合わせる
 
 
 def _normalize_missing(missing_list: list) -> list:
@@ -74,9 +76,9 @@ def _cleanup_old_markers() -> None:
 def _notify_missing(target: str, missing_list: list) -> None:
     """MISSING検知時にChatwork優先で通知する。失敗しても本処理は止めない。"""
     _cleanup_old_markers()
-    if _normalize_missing(missing_list) == ['raw_item'] and datetime.now().hour < KARTE_READY_HOUR:
-        print(f'INFO: raw_itemのみ欠損かつ{KARTE_READY_HOUR}時前のため通知を抑制します'
-              f'(店舗カルテの早朝未確定は常態。{KARTE_READY_HOUR}時台のリトライで回復しなければ通知されます)。')
+    if datetime.now().hour < FINAL_RETRY_HOUR:
+        print(f'INFO: {FINAL_RETRY_HOUR}時の最終リトライ前のため通知を抑制します'
+              f'(リトライで回復しなければ{FINAL_RETRY_HOUR}時台に通知されます)。')
         return
     marker = _marker_path(target, missing_list)
     if marker.exists():
@@ -87,10 +89,11 @@ def _notify_missing(target: str, missing_list: list) -> None:
         return
     try:
         body = (
-            f"[楽天広告分析マスター] raw取込 欠損検知\n"
+            f"[楽天広告分析マスター] raw取込 欠損検知(本日の全リトライ終了)\n"
             f"対象日: {target}\n"
             f"欠損: {', '.join(missing_list)}\n"
-            f"(run_all.ps1 は本日の成功フラグを立てません。次回スケジュール実行で自動リトライされます)"
+            f"(本日{FINAL_RETRY_HOUR}時の最終リトライ後も欠損しています。楽天の遡及期限内に"
+            f"手動バックフィルが必要です → Download-All-Reports.ps1 -Dates)"
         )
         ok = _notify_mod.push(body)
         print(f'INFO: 欠損通知 {"送信成功" if ok else "送信失敗(Chatwork/LINE共に未設定または失敗)"}')

@@ -28,10 +28,13 @@ from pathlib import Path
 CSV_OUT = r"C:\csv_out"
 
 # ── 通知抑制(2026-07-14) ──
-# 店舗カルテは対象日=前日分が楽天側で翌朝9時頃まで未確定のことが常態
-# (2026-05-18発見)。①カルテのみの欠落は9時前は通知しない
+# run_all.ps1 は多段スケジュール(5/6/7/9/10/12/15時)で「取れるまでリトライ」する
+# 設計であり、リトライ余地が残っている間の欠落は正常動作(店舗カルテは前日分が
+# 楽天側で9時頃まで未確定なのが常態)。通知は「最終スケジュール実行
+# (FINAL_RETRY_HOUR時)でもまだ欠落」の場合のみ送る。この通知はBQ欠損通知
+# (check_raw_completeness.py)に対し「ダウンロード段階で欠けた」ことを示す切り分け情報。
 # ②同一日×同一欠落セットの通知は1日1回まで(check_raw_completeness.py と同方式)。
-KARTE_READY_HOUR = 9
+FINAL_RETRY_HOUR = 15  # タスク RakutenDownloadAuto の最終トリガー時刻に合わせる
 
 REQUIRED = [
     ("KW実績(RPPキーワード別12h→raw_keyword)",     os.path.join(CSV_OUT, "rpp_reports", "RPPキーワード別12h_*.csv")),
@@ -93,10 +96,9 @@ def main() -> int:
     print(f"WARN: 本日分の必須CSVが{len(missing)}件欠落: {', '.join(missing)}")
 
     _cleanup_old_markers()
-    if (all(label.startswith("カルテ") for label in missing)
-            and datetime.now().hour < KARTE_READY_HOUR):
-        print(f"INFO: カルテのみ欠落かつ{KARTE_READY_HOUR}時前のため通知を抑制します"
-              f"(店舗カルテの早朝未確定は常態。{KARTE_READY_HOUR}時台のリトライで回復しなければ通知されます)。")
+    if datetime.now().hour < FINAL_RETRY_HOUR:
+        print(f"INFO: {FINAL_RETRY_HOUR}時の最終リトライ前のため通知を抑制します"
+              f"(リトライで回復しなければ{FINAL_RETRY_HOUR}時台に通知されます)。")
         return 2
     marker = _marker_path(today, missing)
     if marker.exists():
@@ -106,11 +108,11 @@ def main() -> int:
     if _notify_mod is not None:
         try:
             body = (
-                f"[楽天広告分析マスター] raw取込 ダウンロード欠落(早期警戒)\n"
+                f"[楽天広告分析マスター] raw取込 ダウンロード欠落(本日の全リトライ終了)\n"
                 f"対象日: {today.isoformat()}\n"
                 f"本日分CSV未生成: {', '.join(missing)}\n"
-                f"(最終判定はBigQuery完全性チェックで別途行われます。"
-                f"同日中の後続スケジュール実行で自動リトライされます)"
+                f"(本日{FINAL_RETRY_HOUR}時の最終リトライ後もダウンロードできていません。"
+                f"欠損確定はBQ欠損通知側を参照)"
             )
             ok = _notify_mod.push(body)
             print(f"INFO: 通知 {'送信成功' if ok else '送信失敗'}")

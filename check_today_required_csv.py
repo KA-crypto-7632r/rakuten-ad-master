@@ -21,10 +21,17 @@ Exit codes:
 import os
 import sys
 import glob
-from datetime import date, datetime
+import hashlib
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 CSV_OUT = r"C:\csv_out"
+
+# ── 通知抑制(2026-07-14) ──
+# 店舗カルテは対象日=前日分が楽天側で翌朝9時頃まで未確定のことが常態
+# (2026-05-18発見)。①カルテのみの欠落は9時前は通知しない
+# ②同一日×同一欠落セットの通知は1日1回まで(check_raw_completeness.py と同方式)。
+KARTE_READY_HOUR = 9
 
 REQUIRED = [
     ("KW実績(RPPキーワード別12h→raw_keyword)",     os.path.join(CSV_OUT, "rpp_reports", "RPPキーワード別12h_*.csv")),
@@ -56,6 +63,21 @@ def _is_today(path: str, today: date) -> bool:
         return False
 
 
+def _marker_path(today: date, missing: list) -> Path:
+    digest = hashlib.md5('|'.join(sorted(missing)).encode('utf-8')).hexdigest()[:8]
+    return Path(CSV_OUT) / f'.notified_csv_{today.isoformat()}_{digest}'
+
+
+def _cleanup_old_markers() -> None:
+    try:
+        cutoff = datetime.now() - timedelta(days=7)
+        for f in Path(CSV_OUT).glob('.notified_*'):
+            if datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
+                f.unlink()
+    except OSError:
+        pass
+
+
 def main() -> int:
     today = date.today()
     missing = []
@@ -70,6 +92,17 @@ def main() -> int:
 
     print(f"WARN: 本日分の必須CSVが{len(missing)}件欠落: {', '.join(missing)}")
 
+    _cleanup_old_markers()
+    if (all(label.startswith("カルテ") for label in missing)
+            and datetime.now().hour < KARTE_READY_HOUR):
+        print(f"INFO: カルテのみ欠落かつ{KARTE_READY_HOUR}時前のため通知を抑制します"
+              f"(店舗カルテの早朝未確定は常態。{KARTE_READY_HOUR}時台のリトライで回復しなければ通知されます)。")
+        return 2
+    marker = _marker_path(today, missing)
+    if marker.exists():
+        print(f"INFO: 同一内容を本日通知済みのため抑制します ({marker.name})。")
+        return 2
+
     if _notify_mod is not None:
         try:
             body = (
@@ -81,6 +114,11 @@ def main() -> int:
             )
             ok = _notify_mod.push(body)
             print(f"INFO: 通知 {'送信成功' if ok else '送信失敗'}")
+            if ok:
+                try:
+                    marker.touch()
+                except OSError:
+                    pass
         except Exception as e:
             print(f"WARN: 通知送信中に例外: {type(e).__name__}: {e}")
     else:

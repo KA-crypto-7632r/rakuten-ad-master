@@ -11,7 +11,9 @@ Exit codes:
   1  - other error (BQ connection failure, key missing, etc.)
 """
 import os
+import re
 import sys
+import hashlib
 import argparse
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -39,8 +41,47 @@ for _np in NOTIFY_PATHS:
             continue
 
 
+# ── 通知抑制(2026-07-14) ──
+# 店舗カルテ(raw_item)は対象日=前日分が楽天側で翌朝9時頃まで未確定のことが常態
+# (2026-05-18発見。過去の成功フラグは毎日9:04頃)。5/6/7時のrunで毎朝通知が
+# 鳴り続けるのを防ぐため、①raw_itemのみの欠損は9時前は通知しない
+# ②同一対象日×同一欠損セットの通知は1日1回まで、とする。
+# exit 2(フラグ不書込→自動リトライ)自体は抑制の有無にかかわらず維持する。
+CSV_OUT_DIR = Path(r'C:\csv_out')
+KARTE_READY_HOUR = 9
+
+
+def _normalize_missing(missing_list: list) -> list:
+    """'raw_affi(stale 40.1h)' 等の動的サフィックスを落としテーブル名だけに揃える。"""
+    return sorted({re.split(r'[(\s]', m)[0] for m in missing_list})
+
+
+def _marker_path(target: str, missing_list: list) -> Path:
+    digest = hashlib.md5('|'.join(_normalize_missing(missing_list)).encode('utf-8')).hexdigest()[:8]
+    return CSV_OUT_DIR / f'.notified_bq_{target}_{digest}'
+
+
+def _cleanup_old_markers() -> None:
+    try:
+        cutoff = datetime.now() - timedelta(days=7)
+        for f in CSV_OUT_DIR.glob('.notified_*'):
+            if datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
+                f.unlink()
+    except OSError:
+        pass
+
+
 def _notify_missing(target: str, missing_list: list) -> None:
     """MISSING検知時にChatwork優先で通知する。失敗しても本処理は止めない。"""
+    _cleanup_old_markers()
+    if _normalize_missing(missing_list) == ['raw_item'] and datetime.now().hour < KARTE_READY_HOUR:
+        print(f'INFO: raw_itemのみ欠損かつ{KARTE_READY_HOUR}時前のため通知を抑制します'
+              f'(店舗カルテの早朝未確定は常態。{KARTE_READY_HOUR}時台のリトライで回復しなければ通知されます)。')
+        return
+    marker = _marker_path(target, missing_list)
+    if marker.exists():
+        print(f'INFO: 同一内容を本日通知済みのため抑制します ({marker.name})。')
+        return
     if _notify_mod is None:
         print('WARN: notify.py 未ロードのため通知をスキップします。')
         return
@@ -53,6 +94,11 @@ def _notify_missing(target: str, missing_list: list) -> None:
         )
         ok = _notify_mod.push(body)
         print(f'INFO: 欠損通知 {"送信成功" if ok else "送信失敗(Chatwork/LINE共に未設定または失敗)"}')
+        if ok:
+            try:
+                marker.touch()
+            except OSError:
+                pass
     except Exception as e:
         print(f'WARN: 欠損通知の送信中に例外: {type(e).__name__}: {e}')
 

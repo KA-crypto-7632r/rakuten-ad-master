@@ -289,10 +289,21 @@ function Get-AffiliateReport {
     $Driver.Navigate().GoToUrl($apiUrl)
     Write-Host "INFO: Download requested from API..."
 
+    # 2026-07-13 修正: 旧ロジックは「.crdownloadが存在しない」ことだけを完了判定にしていたため、
+    # API呼び出し直後(ダウンロードがまだ開始していない瞬間)にループへ入ると
+    # 「.crdownloadが無い=完了」と誤判定して即座に抜けてしまうレースコンディションがあった
+    # (本日3/4回失敗の主因と推定)。ダウンロード開始を確実に待つ小さな事前待機を追加し、
+    # 完了判定も「pending.csvが実在し、かつ.crdownloadが残っていない」の両条件に変更する。
+    Start-Sleep -Seconds 3
     $deadline = (Get-Date).AddMinutes(5)
-    do { Start-Sleep 2; $crdownloadFile = Get-ChildItem $DownloadDir -Filter *.crdownload -ErrorAction SilentlyContinue } until ((-not $crdownloadFile) -or ((Get-Date) -gt $deadline))
-    $downloadedFile = Get-ChildItem $DownloadDir -Filter "pending.csv" -ErrorAction SilentlyContinue
-    if ($downloadedFile) { Write-Host "✔ [Affiliate Report] Download complete -> pending.csv" }
+    $downloadedFile = $null
+    do {
+        Start-Sleep 2
+        $crdownloadFile = Get-ChildItem $DownloadDir -Filter *.crdownload -ErrorAction SilentlyContinue
+        $downloadedFile = Get-ChildItem $DownloadDir -Filter "pending.csv" -ErrorAction SilentlyContinue
+    } until ((($downloadedFile) -and (-not $crdownloadFile)) -or ((Get-Date) -gt $deadline))
+
+    if ($downloadedFile -and (Test-Path $downloadedFile.FullName)) { Write-Host "✔ [Affiliate Report] Download complete -> pending.csv" }
     else { throw "Affiliate report (pending.csv) download failed or timed out." }
 }
 function Set-InputDate($el, [string]$value) {

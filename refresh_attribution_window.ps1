@@ -33,7 +33,11 @@
 # ---------------------------------------------------------------------------
 param(
     [int]$Days = 30,
-    [string[]]$Dates,        # explicit yyyy/MM/dd override; when set, -Days is ignored
+    [string]$Dates,          # explicit override: comma/space separated yyyy/MM/dd. When set, -Days is ignored.
+                             # NOTE: kept as a single [string] on purpose. When a scheduled task launches this
+                             # via `powershell.exe -File ... -Dates a,b,c`, PowerShell does NOT split commas
+                             # into array elements for -File invocation (unlike -Command). So we take one
+                             # string and split it ourselves below -> robust for both task and manual calls.
     [switch]$SkipDownload,   # reuse already-downloaded CSVs (upsert step only)
     [switch]$AnyMtime,       # pass --any-mtime to the uploader (ignore "downloaded today" gate)
     [switch]$ShowBrowser
@@ -50,9 +54,11 @@ Start-Transcript -Path $Log -Append | Out-Null
 Write-Host "[refresh_attribution_window] === START $(Get-Date) ==="
 
 # --- Build target date list ---
-if ($Dates -and $Dates.Count -gt 0) {
-    $targetDates = $Dates
-    Write-Host "[refresh] explicit dates: $($targetDates -join ', ')"
+$explicit = @()
+if ($Dates) { $explicit = @($Dates -split '[,\s]+' | Where-Object { $_ -ne '' }) }
+if ($explicit.Count -gt 0) {
+    $targetDates = $explicit
+    Write-Host "[refresh] explicit dates ($($targetDates.Count)): $($targetDates -join ', ')"
 } else {
     $targetDates = @()
     for ($i = 1; $i -le $Days; $i++) { $targetDates += (Get-Date).AddDays(-$i).ToString('yyyy/MM/dd') }
@@ -72,7 +78,7 @@ if (-not $SkipDownload) {
 
 # --- Step 2: UPSERT into BigQuery ---
 $pyArgs = @('refresh_attribution.py')
-if ($Dates -and $Dates.Count -gt 0) {
+if ($explicit.Count -gt 0) {
     $isoDates = ($targetDates | ForEach-Object { (Get-Date $_).ToString('yyyy-MM-dd') }) -join ','
     $pyArgs += @('--dates', $isoDates)
 } else {

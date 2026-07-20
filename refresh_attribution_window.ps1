@@ -67,10 +67,17 @@ if ($explicit.Count -gt 0) {
 
 # --- Step 1: re-download (Phase 1 = RPP item/keyword/daily only) ---
 if (-not $SkipDownload) {
-    $dlParams = @{ Phase = 1; Dates = $targetDates }
-    if ($ShowBrowser) { $dlParams['ShowBrowser'] = $true }
+    # Launch the existing downloader as a subprocess via -Command (NOT -File). With -Command,
+    # `-Dates a,b,c` is parsed as an array literal and binds to Download's [string[]]$Dates.
+    # -File would instead pass the whole comma string as ONE element -> only the first date
+    # would ever download (this is the bug that made -Days silently fetch just 1 day).
+    # Subprocess (not in-process &) so Download's `exit 1` on a fatal cannot kill this orchestrator
+    # before the upsert step. Single login covers all dates.
+    $datesCsv = $targetDates -join ','
+    $inner = "& '$Base\Download-All-Reports.ps1' -Phase 1 -Dates $datesCsv"
+    if ($ShowBrowser) { $inner += ' -ShowBrowser' }
     Write-Host "[refresh] downloading $($targetDates.Count) date(s) via Download-All-Reports.ps1 -Phase 1 ..."
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\Download-All-Reports.ps1" @dlParams
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command $inner
     Write-Host "[refresh] download step finished (exit=$LASTEXITCODE)."
 } else {
     Write-Host "[refresh] -SkipDownload set: reusing already-downloaded CSVs."

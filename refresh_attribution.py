@@ -202,7 +202,7 @@ def upsert(client: bigquery.Client, table: str, df: pd.DataFrame, dry_run: bool)
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--days', type=int, default=30, help='直近何日分を洗い替えるか(既定30=720h窓)')
+    ap.add_argument('--days', type=int, default=14, help='直近何日分を洗い替えるか(既定14=再取得が高速安定な範囲)')
     ap.add_argument('--dates', type=str, default=None,
                     help='対象日を明示指定(空白/カンマ区切り, YYYY-MM-DD or YYYYMMDD)。指定時は--daysより優先')
     ap.add_argument('--any-mtime', action='store_true', help='本日再取得済み縛りを外す(手動バックフィル用)')

@@ -1,9 +1,12 @@
 ﻿# refresh_attribution_window.ps1  (AD-DQ1 fix orchestrator)
 # ---------------------------------------------------------------------------
 # WHAT: Re-download the RPP per-day item/keyword reports for a trailing window
-#       (default: last 30 days = the 720h attribution window) and UPSERT them
-#       into BigQuery so that orders/sales that mature after the first-morning
-#       fetch are captured. Fixes the AD-DQ1 permanent under-count.
+#       (default: last 14 days) and UPSERT them into BigQuery so that orders/sales
+#       that mature after the first-morning fetch are captured. Fixes the AD-DQ1
+#       permanent under-count. Measured impact (store-wide, 5 sample dates): the
+#       next-morning snapshot under-counted orders by ~42% (217 -> 308) vs the
+#       matured re-fetch. 14d window because RMS only regenerates recent-date
+#       reports quickly; older dates time out server-side (see -Days note).
 #       (Detailed rationale is in refresh_attribution_notes.md -- kept out of
 #        this .ps1 on purpose: Japanese comments in a BOM-less .ps1 get
 #        mis-decoded as cp932 by PowerShell and can corrupt the script.)
@@ -32,7 +35,12 @@
 #   powershell ... -File refresh_attribution_window.ps1 -SkipDownload   # upsert only
 # ---------------------------------------------------------------------------
 param(
-    [int]$Days = 30,
+    [int]$Days = 14,         # trailing window to re-fetch. Default 14: RMS reliably regenerates
+                             # reports only for RECENT dates (empirically <=~19d = fast; >=~24d the
+                             # server-side report generation times out ~18min/report). A daily run
+                             # keeps refreshing each date for 14 days, so maturation is captured
+                             # progressively while the date is still re-fetchable. Bump manually for
+                             # a deeper (slower) backfill; going past ~19 days mostly hits timeouts.
     [string]$Dates,          # explicit override: comma/space separated yyyy/MM/dd. When set, -Days is ignored.
                              # NOTE: kept as a single [string] on purpose. When a scheduled task launches this
                              # via `powershell.exe -File ... -Dates a,b,c`, PowerShell does NOT split commas

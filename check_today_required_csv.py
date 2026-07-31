@@ -25,7 +25,21 @@ import hashlib
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from rpp_zero_delivery import is_zero_delivery_day
+
 CSV_OUT = r"C:\csv_out"
+
+# ── 配信ゼロ日の通知抑制(2026-07-31) ──
+# RakutenDownloadAutoは前日分をダウンロードする設計のため、本チェッカーが見る
+# 「本日分CSV」の対象日は today - 1 日。この対象日にRPP配信が無かった場合、
+# 楽天は商品別・KW別レポートのCSV自体を生成しない(「対象データがありません」)。
+# 取込失敗ではなく元データの不在なので通知を抑制する。判定式は
+# check_raw_completeness.py と共有(rpp_zero_delivery.py)。
+# カルテ(raw_item)・RPP費用(raw_rppexp)はRPP配信の有無と無関係なので対象外。
+ZERO_DELIVERY_LABELS = {
+    "KW実績(RPPキーワード別12h→raw_keyword)",
+    "商品別RPP(RPP商品別12h→raw_shohin_betsu)",
+}
 
 # ── 通知抑制(2026-07-14) ──
 # run_all.ps1 は多段スケジュール(5/6/7/9/10/12/15時)で「取れるまでリトライ」する
@@ -94,6 +108,14 @@ def main() -> int:
         return 0
 
     print(f"WARN: 本日分の必須CSVが{len(missing)}件欠落: {', '.join(missing)}")
+
+    if set(missing) <= ZERO_DELIVERY_LABELS:
+        target = (today - timedelta(days=1)).isoformat()
+        if is_zero_delivery_day(target):
+            print(f"INFO: 通知を抑制します: {target} はRPP配信ゼロ"
+                  f"(店舗全体の日次12hレポート clicks=0 cost=0)"
+                  f"＝楽天側に元データが無くダウンロードできないのが正常。")
+            return 2
 
     _cleanup_old_markers()
     if datetime.now().hour < FINAL_RETRY_HOUR:

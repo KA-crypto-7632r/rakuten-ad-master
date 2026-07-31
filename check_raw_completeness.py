@@ -118,6 +118,11 @@ REQUIRED = ['raw_shohin_betsu', 'raw_keyword', 'raw_rppexp', 'raw_item']
 # 「当日中に1回以上 refresh されているか」だけ確認する。
 AFFI_TABLE = 'raw_affi'
 AFFI_MAX_STALE_HOURS = 36  # 36時間以上更新が無ければ MISSING 扱い
+# 2026-07-20 追加: modified時刻ベースは「テーブルが触れられた」だけで新鮮判定してしまい、
+# アフィDL失敗(pending.csv未取得)で実データが進まなくても素通りする穴があった
+# (7/18〜7/20朝の3日連続DL失敗を検知漏れ→毎日09:09に成功フラグが書かれ10/12/15時の再実行がスキップ
+#  →15時の通知条件に永遠に到達せずサイレント化)。実データ=成果発生日時の最新が N 日以上前なら MISSING 扱い。
+AFFI_MAX_DATA_AGE_DAYS = 2
 
 
 def find_key():
@@ -180,6 +185,26 @@ def main():
             missing.append(f'{AFFI_TABLE}(stale {stale.total_seconds()/3600:.1f}h)')
     except Exception as e:
         missing.append(f'{AFFI_TABLE}(check_failed:{type(e).__name__})')
+
+    # 2026-07-20 追加: 実データの新しさ(成果発生日時の最新)で停止を検知する。
+    # 成果発生日時は "YYYY-MM-DD H:MM:SS"(時が1桁になり得る)ため、日付部10桁だけ取り出し
+    # 文字列MAX(ゼロ埋め日付=辞書順が時系列と一致)→本日との日数差で判定する。
+    try:
+        affi_q = (f"SELECT MAX(SUBSTR(CAST(`成果発生日時` AS STRING),1,10)) AS d "
+                  f"FROM `{PROJECT}.{DATASET}.{AFFI_TABLE}`")
+        affi_rows = list(bq.query(affi_q).result())
+        max_d = affi_rows[0].d if affi_rows else None
+        if not max_d:
+            if not any(m.startswith(AFFI_TABLE) for m in missing):
+                missing.append(f'{AFFI_TABLE}(no_data)')
+        else:
+            newest = datetime.strptime(max_d, '%Y-%m-%d').date()
+            age_days = (date.today() - newest).days
+            if age_days >= AFFI_MAX_DATA_AGE_DAYS and not any('data_stale' in m for m in missing):
+                missing.append(f'{AFFI_TABLE}(data_stale {age_days}d, newest={max_d})')
+    except Exception as e:
+        if not any(m.startswith(AFFI_TABLE) for m in missing):
+            missing.append(f'{AFFI_TABLE}(data_check_failed:{type(e).__name__})')
 
     if missing:
         print(f'MISSING({target}): {",".join(missing)}')

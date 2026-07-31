@@ -12,6 +12,7 @@ Exit codes:
 """
 import os
 import re
+import csv
 import sys
 import hashlib
 import argparse
@@ -52,6 +53,16 @@ for _np in NOTIFY_PATHS:
 CSV_OUT_DIR = Path(r'C:\csv_out')
 FINAL_RETRY_HOUR = 15  # タスク RakutenDownloadAuto の最終トリガー時刻に合わせる
 
+# ── 配信ゼロ日の通知抑制(2026-07-31) ──
+# RPPの配信が無い日(予算枯渇/キャンペーンOFF)は楽天が商品別・KW別レポートを
+# 生成しない(「対象データがありません」)ため、CSVが落ちず raw_shohin_betsu /
+# raw_keyword に行が入らない。これは取込失敗ではなく元データの不在であり、
+# 手動バックフィルは不可能かつ不要。従来はこの2つを区別できず毎日1通鳴っていた。
+# 判定材料は店舗全体の日次(12h)レポート(欠損日ゼロで必ず取得できる)。
+RPP_REPORT_DIR = CSV_OUT_DIR / 'rpp_reports'
+RPP_DAILY_COLS = 42  # 日次レポートの列数(商品別/KW別レポートと区別するための指紋)
+ZERO_DELIVERY_TABLES = {'raw_shohin_betsu', 'raw_keyword'}
+
 
 def _normalize_missing(missing_list: list) -> list:
     """'raw_affi(stale 40.1h)' 等の動的サフィックスを落としテーブル名だけに揃える。"""
@@ -73,12 +84,72 @@ def _cleanup_old_markers() -> None:
         pass
 
 
+def _rpp_daily_totals(target: str):
+    """対象日の日次(12h)店舗全体レポートから (クリック数合計, 実績額合計) を返す。
+
+    同一対象日に複数のDL世代があるため最新世代を採用する。
+    レポートが見つからない/読めない場合は None(=判定不能)を返す。
+    """
+    ymd = target.replace('-', '')
+    best = None  # (世代スタンプ, clicks, cost)
+    try:
+        paths = list(RPP_REPORT_DIR.glob(f'*_{ymd}_*.csv'))
+    except OSError:
+        return None
+    for path in paths:
+        m = re.search(r'_%s_(\d{8})_(\d{4})\.csv$' % ymd, path.name)
+        if not m:
+            continue
+        stamp = m.group(1) + m.group(2)
+        if best is not None and stamp <= best[0]:
+            continue
+        try:
+            with open(path, encoding='cp932', errors='replace', newline='') as f:
+                rows = list(csv.reader(f))
+        except OSError:
+            continue
+        # 商品別/KW別レポートも同じ命名なので、列数で日次レポートだけを選ぶ。
+        if len(rows) < 2 or len(rows[0]) != RPP_DAILY_COLS:
+            continue
+        try:
+            best = (stamp, int(rows[1][3] or 0), int(rows[1][4] or 0))
+        except (ValueError, IndexError):
+            continue
+    return None if best is None else (best[1], best[2])
+
+
+def _zero_delivery_reason(target: str, missing_list: list):
+    """RPP配信ゼロで元データが存在しない日なら理由文字列、そうでなければ None。
+
+    2025-07-30〜2026-07-30の全日突合(日次レポート324日 × BQ実行数)で検証済み:
+      ・クリック>0 なのに両テーブルが空だった日 = 0件(=本物の欠損を隠さない)
+      ・クリック0 なのにBQに行がある日        = 0件(=日次レポートは嘘をつかない)
+    欠損に raw_rppexp/raw_item/raw_affi が含まれる場合は RPP の配信有無と無関係
+    なので抑制しない。日次レポート自体が無い日も判定不能として抑制しない。
+    """
+    tables = set(_normalize_missing(missing_list))
+    if not tables or not tables <= ZERO_DELIVERY_TABLES:
+        return None
+    totals = _rpp_daily_totals(target)
+    if totals is None:
+        return None
+    clicks, cost = totals
+    if clicks == 0 and cost == 0:
+        return (f'{target} はRPP配信ゼロ(店舗全体の日次12hレポート clicks=0 cost=0)'
+                f'＝楽天側に元データが無く手動バックフィル不可・不要')
+    return None
+
+
 def _notify_missing(target: str, missing_list: list) -> None:
     """MISSING検知時にChatwork優先で通知する。失敗しても本処理は止めない。"""
     _cleanup_old_markers()
     if datetime.now().hour < FINAL_RETRY_HOUR:
         print(f'INFO: {FINAL_RETRY_HOUR}時の最終リトライ前のため通知を抑制します'
               f'(リトライで回復しなければ{FINAL_RETRY_HOUR}時台に通知されます)。')
+        return
+    zero_reason = _zero_delivery_reason(target, missing_list)
+    if zero_reason:
+        print(f'INFO: 通知を抑制します: {zero_reason}。')
         return
     marker = _marker_path(target, missing_list)
     if marker.exists():

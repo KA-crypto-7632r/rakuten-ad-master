@@ -269,42 +269,61 @@ function Get-AffiliateReport {
     param(
         $Driver,
         $DownloadDir,
-        [string]$TargetMonth  # 例: "2025-10"
+        [string]$TargetMonth,          # 例: "2025-10"
+        [int]$MaxAttempts = 3,         # 2026-07-20 追加: 同一実行内リトライ回数
+        [int]$PerAttemptTimeoutSec = 180,
+        [int]$RetryBackoffSec = 20
     )
     Write-Host "`n--- Downloading: Affiliate Report (pending.csv) ---"
     if ([string]::IsNullOrWhiteSpace($TargetMonth)) { throw "TargetMonth is required (e.g. 2025-10)." }
     Write-Host "INFO: Target month set to $TargetMonth"
 
-    Write-Host "INFO: Navigating to .../rates to establish session..."
-    $Driver.Navigate().GoToUrl("https://afl.rms.rakuten.co.jp/rates"); Start-Sleep 3
-    Write-Host "INFO: Navigating to .../report..."
-    $Driver.Navigate().GoToUrl("https://afl.rms.rakuten.co.jp/report/"); Start-Sleep 3
-    Write-Host "INFO: Navigating to .../pending page..."
-    $Driver.Navigate().GoToUrl("https://afl.rms.rakuten.co.jp/report/pending?date=$TargetMonth"); Start-Sleep 3
-    Write-Host "INFO: Human-viewable page visited successfully."
+    $apiUrl  = "https://afl.rms.rakuten.co.jp/api/report/download/pending?format=csv&date=$TargetMonth"
+    $target  = Join-Path $DownloadDir "pending.csv"
 
-    $apiUrl = "https://afl.rms.rakuten.co.jp/api/report/download/pending?format=csv&date=$TargetMonth"
-    $oldFile = Join-Path $DownloadDir "pending.csv"
-    if (Test-Path $oldFile) { Remove-Item $oldFile -Force; Write-Host "INFO: Removed old pending.csv" }
-    $Driver.Navigate().GoToUrl($apiUrl)
-    Write-Host "INFO: Download requested from API..."
+    # 2026-07-20 リトライ強化: afl.rms のDLタイムアウトが単発で頻発する(7/18〜7/20朝に3日連続失敗)ため、
+    #   セッション確立→API→完了待ちを1試行として最大 $MaxAttempts 回まで同一実行内でリトライする。
+    #   0バイトファイルは成功扱いにしない。全試行失敗時のみ throw(上位catchが警告)。
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            Write-Host "INFO: [Affiliate] Attempt $attempt/$MaxAttempts"
+            # セッション確立のためのページ遷移
+            $Driver.Navigate().GoToUrl("https://afl.rms.rakuten.co.jp/rates"); Start-Sleep 3
+            $Driver.Navigate().GoToUrl("https://afl.rms.rakuten.co.jp/report/"); Start-Sleep 3
+            $Driver.Navigate().GoToUrl("https://afl.rms.rakuten.co.jp/report/pending?date=$TargetMonth"); Start-Sleep 3
 
-    # 2026-07-13 修正: 旧ロジックは「.crdownloadが存在しない」ことだけを完了判定にしていたため、
-    # API呼び出し直後(ダウンロードがまだ開始していない瞬間)にループへ入ると
-    # 「.crdownloadが無い=完了」と誤判定して即座に抜けてしまうレースコンディションがあった
-    # (本日3/4回失敗の主因と推定)。ダウンロード開始を確実に待つ小さな事前待機を追加し、
-    # 完了判定も「pending.csvが実在し、かつ.crdownloadが残っていない」の両条件に変更する。
-    Start-Sleep -Seconds 3
-    $deadline = (Get-Date).AddMinutes(5)
-    $downloadedFile = $null
-    do {
-        Start-Sleep 2
-        $crdownloadFile = Get-ChildItem $DownloadDir -Filter *.crdownload -ErrorAction SilentlyContinue
-        $downloadedFile = Get-ChildItem $DownloadDir -Filter "pending.csv" -ErrorAction SilentlyContinue
-    } until ((($downloadedFile) -and (-not $crdownloadFile)) -or ((Get-Date) -gt $deadline))
+            # 古い pending.csv と .crdownload 残骸を除去(前試行由来の誤検知防止)
+            if (Test-Path $target) { Remove-Item $target -Force; Write-Host "INFO: Removed old pending.csv" }
+            Get-ChildItem $DownloadDir -Filter *.crdownload -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
-    if ($downloadedFile -and (Test-Path $downloadedFile.FullName)) { Write-Host "✔ [Affiliate Report] Download complete -> pending.csv" }
-    else { throw "Affiliate report (pending.csv) download failed or timed out." }
+            $Driver.Navigate().GoToUrl($apiUrl)
+            Write-Host "INFO: Download requested from API..."
+
+            # 2026-07-13: API呼出直後は.crdownloadが未生成のため即時「完了」誤判定するレース有り→事前待機。
+            # 完了判定=「pending.csvが実在し(>0byte)、かつ.crdownloadが残っていない」の両条件。
+            Start-Sleep -Seconds 3
+            $deadline = (Get-Date).AddSeconds($PerAttemptTimeoutSec)
+            $downloadedFile = $null
+            do {
+                Start-Sleep 2
+                $crdownloadFile = Get-ChildItem $DownloadDir -Filter *.crdownload -ErrorAction SilentlyContinue
+                $downloadedFile = Get-ChildItem $DownloadDir -Filter "pending.csv" -ErrorAction SilentlyContinue
+            } until ((($downloadedFile) -and (-not $crdownloadFile)) -or ((Get-Date) -gt $deadline))
+
+            if ($downloadedFile -and (Test-Path $downloadedFile.FullName) -and ($downloadedFile.Length -gt 0)) {
+                Write-Host "✔ [Affiliate Report] Download complete -> pending.csv (attempt $attempt/$MaxAttempts, $([math]::Round($downloadedFile.Length/1KB,1)) KB)"
+                return
+            }
+            throw "pending.csv did not complete within ${PerAttemptTimeoutSec}s"
+        } catch {
+            Write-Warning "WARN: [Affiliate] Attempt $attempt/$MaxAttempts failed: $($_.Exception.Message)"
+            if ($attempt -lt $MaxAttempts) {
+                Write-Host "INFO: [Affiliate] Retrying in ${RetryBackoffSec}s..."
+                Start-Sleep -Seconds $RetryBackoffSec
+            }
+        }
+    }
+    throw "Affiliate report (pending.csv) download failed or timed out after $MaxAttempts attempts."
 }
 function Set-InputDate($el, [string]$value) {
     if (-not $el) { throw "Set-InputDate: element is null" }

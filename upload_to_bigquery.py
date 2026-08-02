@@ -119,6 +119,117 @@ CSV_CONFIG = {
 # ▲▲▲ 設定ここまで
 # ============================================================
 
+# ============================================================
+# 【2026-08-02追加・AD-KW-SPIKE2】目安CPCスパイクガード（RAW_キーワードのみ対象）
+#
+# 背景: read_kw_settings.py（Seleniumスクレイパー・完全に別パイプライン）で
+# 2026-07-28~08-01に「目安CPC」が本来の10倍前後になる異常値がBQへ書き込まれる
+# インシデントが発生し、対策としてスパイク検知ガードが実装された
+# （C:\rakuten-automation\楽天広告KW自動化\read_kw_settings.py）。
+#
+# 同型の汚染は raw_keyword（RMSのCSVレポートDL経由・本ファイルが取込元）でも
+# 実際に起きていたことをBQ実測で確認済み（2026-08-02調査。例: bird-ref「鳩よけ」の
+# 目安CPCが2026-07-13の66円→07-14の1001円へ約15倍に跳ねた記録がそのままraw_keywordに
+# 残っている）。ここは read_kw_settings.py のガードが一切効かない別経路のため、
+# 同じ閾値・同じ思想でガードを追加する。
+#
+# 【定数・判定ロジックは read_kw_settings.py と手動同期】
+# read_kw_settings.py を直接importして共通化しない理由: そちらはモジュール直下で
+# argparse.parse_args() 実行後、無条件に実Seleniumブラウザ起動→実RMSログインまで
+# 進む設計のため、importするだけで本番同等の副作用（ブラウザ起動・RMSログイン）が
+# 走ってしまう（test_guideline_spike_guard.py が同じ理由でロジックを複製している
+# 既存の流儀と同様）。定数・ロジックを変更する場合は両ファイルを手動で同期させること。
+# ============================================================
+GUIDELINE_SPIKE_RATIO = 3.0     # 前回比でこの倍率を超えたらスパイク疑い
+GUIDELINE_SPIKE_ABS_MIN = 150   # かつ絶対額でこの円数以上増えていること（小額の自然な変動は許容）
+GUIDELINE_BASELINE_LOOKBACK_DAYS = 30  # 基準値を探す遡り期間（古すぎる値を基準にしない）
+
+
+def is_guideline_spike(guide_val, prior_val):
+    """read_kw_settings.py の is_guideline_spike と同一ロジック（値のみ手動同期）。
+    条件: 今回値/前回値がともに有効 かつ 前回値>=40円(異常値でない) かつ
+          今回値が前回値のGUIDELINE_SPIKE_RATIO倍を超える かつ 絶対差がGUIDELINE_SPIKE_ABS_MINを超える。"""
+    return (guide_val is not None and prior_val is not None and prior_val >= 40
+            and guide_val > prior_val * GUIDELINE_SPIKE_RATIO
+            and (guide_val - prior_val) > GUIDELINE_SPIKE_ABS_MIN)
+
+
+def _fetch_guideline_baseline(client: bigquery.Client, tid: str) -> dict:
+    """raw_keyword の既存データから (商品管理番号, キーワード) ごとの
+    「直近GUIDELINE_BASELINE_LOOKBACK_DAYS日以内・直近の数値化できる目安CPC」を
+    スパイク検知の基準値として返す。取得できなければ空dict（＝ガードはスキップされ、
+    従来どおり素通りする＝fail-open。read_kw_settings.py の fetch_prior_guideline_map
+    と同じfail-open方針）。"""
+    try:
+        date_expr = (
+            "COALESCE("
+            "SAFE.PARSE_DATE('%Y-%m-%d', SUBSTR(`日付`,1,10)),"
+            "SAFE.PARSE_DATE('%Y年%m月%d日', REGEXP_EXTRACT(`日付`, r'(\\d{4}年\\d{2}月\\d{2}日)'))"
+            ")"
+        )
+        sql = f"""
+        SELECT sku, kw, guide FROM (
+          SELECT `商品管理番号` AS sku, `キーワード` AS kw,
+                 SAFE_CAST(`目安CPC` AS FLOAT64) AS guide,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY `商品管理番号`, `キーワード`
+                   ORDER BY {date_expr} DESC
+                 ) AS rn
+          FROM `{tid}`
+          WHERE `目安CPC` IS NOT NULL AND `目安CPC` != ''
+            AND SAFE_CAST(`目安CPC` AS FLOAT64) IS NOT NULL
+            AND {date_expr} >= DATE_SUB(CURRENT_DATE('Asia/Tokyo'), INTERVAL {GUIDELINE_BASELINE_LOOKBACK_DAYS} DAY)
+        )
+        WHERE rn = 1
+        """
+        return {(r["sku"], r["kw"]): r["guide"] for r in client.query(sql).result()}
+    except Exception as e:
+        print(f"  [WARN] 目安CPC基準値取得失敗（スパイク検知はスキップ）: {e}")
+        return {}
+
+
+def apply_guideline_spike_guard(client: bigquery.Client, tid: str, new_df: pd.DataFrame) -> pd.DataFrame:
+    """RAW_キーワード取込時の目安CPCスパイクガード（read_kw_settings.pyと同じ閾値・同じ思想）。
+    new_df（このアップロード分）の各行について、(商品管理番号,キーワード)の直近基準値と比べて
+    急激にジャンプしていれば「目安CPC」を空文字（このテーブルは全列STRINGなのでNULL相当）に
+    書き換えて返す。元のraw値はCSVファイル(C:\\csv_out\\rpp_reports\\)に残るため完全な
+    監査ロスにはならない。失敗時はfail-open（ガードをスキップして元のnew_dfをそのまま返す）。"""
+    required_cols = {"商品管理番号", "キーワード", "目安CPC"}
+    if new_df.empty or not required_cols.issubset(set(new_df.columns)):
+        return new_df
+
+    baseline = _fetch_guideline_baseline(client, tid)
+    if not baseline:
+        return new_df  # 基準値が無い（初回取込・テーブル未作成等）＝判定不能でfail-open
+
+    def _to_float(v):
+        try:
+            return float(str(v).replace(",", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    df = new_df.copy()
+    spikes = []
+    for idx, row in df.iterrows():
+        sku = str(row["商品管理番号"]).strip()
+        kw = str(row["キーワード"]).strip()
+        guide_val = _to_float(row["目安CPC"])
+        prior_val = baseline.get((sku, kw))
+        if is_guideline_spike(guide_val, prior_val):
+            spikes.append((sku, kw, prior_val, guide_val))
+            df.at[idx, "目安CPC"] = ""  # 空文字化＝NULL相当で保存（このテーブルは全列STRING）
+
+    if spikes:
+        print(f"  [WARN] RAW_キーワード 目安CPCスパイク検知 {len(spikes)}件（目安CPCを空値化して保存）:")
+        for sku, kw, prior_val, guide_val in spikes[:10]:
+            ratio_str = f"{(guide_val / prior_val):.1f}倍" if prior_val else "?倍"
+            print(f"    sku={sku} kw='{kw}' 前回={prior_val}円 → 今回={guide_val}円（{ratio_str}）")
+        if len(spikes) > 10:
+            print(f"    …他{len(spikes) - 10}件")
+
+    return df
+
+
 JST       = timezone(timedelta(hours=9))
 TODAY_JST = datetime.now(JST).date()
 
@@ -388,6 +499,10 @@ def process_sheet(client: bigquery.Client, sheet_name: str, config: dict):
             # 日付列を正規化値で上書き（表記統一）
             new_df[date_col] = new_df['__norm__']
             new_df = new_df.drop(columns=['__norm__'])
+
+            # 【2026-08-02追加・AD-KW-SPIKE2】RAW_キーワードのみ、目安CPCスパイクガードを通す
+            if sheet_name == 'RAW_キーワード':
+                new_df = apply_guideline_spike_guard(client, tid, new_df)
 
             upload_df(client, new_df, tid, sheet_name)
 

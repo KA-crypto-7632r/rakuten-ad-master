@@ -75,5 +75,20 @@ Get-ChildItem -Path $CsvOut -Filter ".success_*" -Force -ErrorAction SilentlyCon
     Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-7) } |
     Remove-Item -Force -ErrorAction SilentlyContinue
 
+# Step 6: Kick the dashboard full rebuild, chained to data completeness (2026-08-07).
+#   MorningBuild's fixed 5:25 trigger fires BEFORE Rakuten finalizes yesterday's
+#   reports (the success flag lands ~9:14 daily), so yesterday's ads stayed
+#   invisible on the dashboard until an ad-hoc afternoon rebuild. Kicking here ties
+#   the rebuild to data readiness instead of a clock time. This block runs at most
+#   once per day: it is only reached in the same run that newly writes the flag
+#   (flag-exists runs exit early at the top). /Run is async (returns immediately);
+#   the task has MultipleInstancesPolicy=IgnoreNew, so an overlapping start is harmless.
+schtasks /Run /TN "RakutenAdDashboard_MorningBuild" | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "[run_all] Dashboard rebuild kicked (RakutenAdDashboard_MorningBuild)."
+} else {
+    Write-Host "[run_all] WARN: could not kick dashboard rebuild (exit=$LASTEXITCODE). Next scheduled build will pick it up."
+}
+
 Write-Host "[run_all] === DONE $(Get-Date) ==="
 exit 0
